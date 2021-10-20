@@ -4,19 +4,19 @@
 
 static const uint32_t PIN_MASK = 0x1ffffu; // 17 bits; pins GP0 -> GP16
 
-uint32_t add_tick(uint32_t secs) {
-    ++secs;
+uint32_t add_tick(uint32_t semiSecs) {
+    ++semiSecs;
     // wrap daily
-    secs %= 86400;
-    return secs;
+    semiSecs %= 86400;
+    return semiSecs;
 }
 
-static void update_pins(uint32_t value) {
-    uint32_t pinState = value;
+static void set_gpio_pins(uint32_t semiSecs) {
+    uint32_t pinState = semiSecs / 2;
 
 #if defined(PICO_DEFAULT_LED_PIN)
     // Set default LED to low bit too
-    pinState |= (value & 0x01) << PICO_DEFAULT_LED_PIN;
+    pinState |= (semiSecs & 0x01) << PICO_DEFAULT_LED_PIN;
 #endif
 
     gpio_put_all(pinState);
@@ -33,16 +33,18 @@ static void setup() {
     gpio_set_dir_out_masked(pinMask);
 }
 
-void main() {
+int main() {
     setup();
 
     absolute_time_t nextWakeup = get_absolute_time();
-    uint32_t secs = 0;
+    uint32_t semiSecs = 0;
 
     for (;;) {
-        nextWakeup = delayed_by_ms(nextWakeup, 1000);
+        nextWakeup = delayed_by_ms(nextWakeup, 500);
         sleep_until(nextWakeup);
-        secs = add_tick(secs);
-        update_pins(secs);
+        semiSecs = add_tick(semiSecs);
+        set_gpio_pins(semiSecs);
     }
+
+    return 0;
 }
