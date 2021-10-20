@@ -4,7 +4,7 @@
 
 static const uint32_t PIN_MASK = 0x1ffffu; // 17 bits; pins GP0 -> GP16
 
-uint32_t add_tick(uint32_t secs) {
+static uint32_t add_tick(uint32_t secs) {
     ++secs;
     // wrap daily
     secs %= 86400;
