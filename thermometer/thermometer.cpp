@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cmath>
 
 #include "hardware/adc.h"
@@ -10,14 +11,20 @@ static constexpr int least_significant_digit_common_gpio = 2;
 // segment pins begin at this gpio
 static constexpr int first_segment_gpio = 6;
 
-// measured at 3.28 with external reference, but readings indicate 3.3 closer to
-// reality; perhaps the error was in the reference measurement.
-static constexpr float adc_voltage = 3.3f;
-static constexpr float temp_scale = adc_voltage / (1u << 12);
-// TODO: Increase to 10... maybe poll temp on core 1 while core 0 updates the
-// display.
-// TODO more: Have PIO run the LED pins and only wake up to update the reading.
-static constexpr int secs_between_updates = 1;
+// Temperature sensor ADC inputs
+static constexpr int EXT_TEMP_SENSOR_ADC = 0;
+static constexpr int PICO_TEMP_SENSOR_ADC = 4; // Raspberry Pi Pico
+// ADC input tied to ground for more accurate calculaton of 0 mV ADC input.
+static constexpr int ZERO_ADC = 2;
+
+// ADC_VREF as measured. Nominally 3.3, but typically measures 3.27 to 3.28 V.
+static constexpr float ADC_VOLTAGE = 3.27f;
+static constexpr int ADC_BITS = 12;
+static constexpr unsigned int ADC_MAX = 1u << ADC_BITS;
+static constexpr float ADC_VOLTS_PER_UNIT = ADC_VOLTAGE / ADC_MAX;
+// Future: PIO will update LED pins so the core can sleep between samples
+// (likely 1 sample per second, display average of last 10 samples).
+static constexpr std::chrono::seconds TEMP_UPDATE_INTERVAL = std::chrono::seconds(1);
 
 static constexpr uint32_t get_common_gpio_mask() noexcept {
     uint32_t mask = 0;
@@ -33,20 +40,55 @@ static constexpr uint32_t segment_gpio_mask = 0xff << first_segment_gpio;
 static constexpr uint32_t common_gpio_mask = get_common_gpio_mask();
 static constexpr uint32_t all_digit_gpios_mask = segment_gpio_mask | common_gpio_mask;
 
-static float get_temperature_celsius() {
+static float get_temperature_celsius_pico() {
     // make sure resulting type is big enough to hold max 12-bit value (4095) x
     // numSamples.
     constexpr int numSamples = 4;
     uint32_t accumulatedSamples = 0;
     static_assert(std::numeric_limits<decltype(accumulatedSamples)>::max() / (1U << 12) >= numSamples,
             "accumulatedSamples might wraparound, use fewer samples or a larger type");
+    adc_select_input(4);
     for (int i = 0; i < numSamples; ++i)
         accumulatedSamples += adc_read();
+
+    // Get a sample of a tied-to-ground ADC input to subtract the baseline
+    adc_select_input(2);
+    uint32_t zero = 0;
+    accumulatedSamples -= zero * numSamples;
+    // Restore the input to the temperature sensor
+    adc_select_input(4);
 
     float adcTemp = accumulatedSamples / float(numSamples);
 
     // from datasheet
-    return 27.0f - (adcTemp * temp_scale - 0.706f) / 0.001721f;
+    return 27.0f - (adcTemp * ADC_VOLTS_PER_UNIT - 0.706f) / 0.001721f;
+}
+
+static float get_temperature_celsius_external() {
+    adc_select_input(EXT_TEMP_SENSOR_ADC);
+
+    // Eventually replace with a single read and a history buffer that is
+    // averaged.
+    constexpr int numSamples = 4;
+    uint32_t accumulatedSamples = 0;
+    for (int i = 0; i < numSamples; ++i)
+        accumulatedSamples += adc_read();
+
+    const uint16_t adcValue = static_cast<uint16_t>(accumulatedSamples / numSamples);
+    const float adcVolts = adcValue * ADC_VOLTS_PER_UNIT;
+    const float adcMilliVolts = adcVolts * 1000.0f;
+    // Datasheet: 10 mV per degree celsius
+    const float degreesCelsiusAboveBase = adcMilliVolts / 10.0f;
+    // TMP36 0 volts is -50 C (though its min spec is 100 mV aka -40 C).
+    // (Max output is 2000 mV or 150 degrees Celsius, though its max spec is 125
+    // degrees Celsius.)
+    constexpr float TMP36_BASE_TEMP = -50.0f;
+    return TMP36_BASE_TEMP + degreesCelsiusAboveBase;
+}
+
+static float get_temperature_celsius() {
+    //return get_temperature_celsius_pico();
+    return get_temperature_celsius_external();
 }
 
 static float celsius_to_fahrenheit(float degrees_celsius) {
@@ -139,11 +181,13 @@ int main() {
 
     absolute_time_t nextWakeup = get_absolute_time();
     float temperature_celsius = 0.0f;
+    constexpr auto updateIntervalMS
+        = std::chrono::duration_cast<std::chrono::milliseconds>(TEMP_UPDATE_INTERVAL);
 
     for (;;) {
         temperature_celsius = get_temperature_celsius();
         display(celsius_to_fahrenheit(temperature_celsius));
-        nextWakeup = delayed_by_ms(nextWakeup, secs_between_updates * 1000);
+        nextWakeup = delayed_by_ms(nextWakeup, updateIntervalMS.count());
         sleep_until(nextWakeup);
     }
 
