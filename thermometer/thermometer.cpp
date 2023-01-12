@@ -2,7 +2,10 @@
 #include <cmath>
 
 #include "hardware/adc.h"
+#include "hardware/pio.h"
 #include "pico/time.h"
+
+#include "segment_display.pio.h"
 
 static constexpr int NUM_DIGITS = 3;
 // common pin for each significant digit begins at this gpio
@@ -99,13 +102,54 @@ static float get_temperature_farenheit() {
     return celsius_to_fahrenheit(get_temperature_celsius());
 }
 
-static void setup() {
+static void disable_unused_clocks() {
+#if 0 // Enable after verifying PIO
+    clocks_init();
+
+    for (int clock = 0; clock < CLK_COUNT; ++clock) {
+        // Keep clk_ref (XOSC, for sleeps), clk_sys (for CPU) & clk_adc running
+        if (clock != clk_ref && clock != clk_sys && clock != clk_adc)
+            clock_stop(clock);
+    }
+#endif
+}
+
+static void setup_adc() {
     adc_init();
     adc_set_temp_sensor_enabled(true);
     adc_select_input(4); // temp sensor
+}
 
-    gpio_init_mask(all_digit_gpios_mask);
-    gpio_set_dir_out_masked(all_digit_gpios_mask);
+struct display_pio {
+    PIO pio;
+    uint offset;
+    uint sm;
+};
+
+static display_pio setup_pio() {
+    PIO pio = pio0;
+    uint offset = pio_add_program(pio, &segment_display_program);
+    uint sm = pio_claim_unused_sm(pio, true);
+    segment_display_pio_init(
+            pio,
+            sm,
+            offset,
+            first_segment_gpio,
+            least_significant_digit_common_gpio);
+
+    return display_pio{pio, offset, sm};
+}
+
+static display_pio setup() {
+    disable_unused_clocks();
+    // TODO (optional): Slow clk_sys (CPU) as low as 1 kHz.
+
+    setup_adc();
+
+    //gpio_init_mask(all_digit_gpios_mask);
+    //gpio_set_dir_out_masked(all_digit_gpios_mask);
+
+    return setup_pio();
 }
 
 // Allow easy software remapping of LED pins.
@@ -158,26 +202,51 @@ static void display_digit(int place, int_fast8_t value, bool decimal_point = fal
     gpio_put_masked(all_digit_gpios_mask, gpio_pins);
 }
 
+static uint8_t encode_digit(int_fast8_t value, bool decimal_point = false)
+{
+    // don't trust the caller
+    value %= 10;
+    uint8_t encoded = led_pins::display_pins[value];
+    if (decimal_point)
+        encoded |= led_pins::dp;
+    // Segment pins are flipped; lit = LOW, dark = HIGH (common anode).
+    return ~encoded;
+}
+
 static void clear_digits() {
     // set common & segment GPIOs LOW
     gpio_clr_mask(all_digit_gpios_mask);
 }
 
-static void display(float value) {
+static uint32_t encode_for_pio(float value) {
     float dekaValue = value * 10.0f;
     dekaValue = std::round(dekaValue);
-    for (int i = 0; i < 30; ++i) {
-        display_digit(2, static_cast<uint_fast8_t>(dekaValue / 100) % 10);
-        sleep_ms(10);
-        display_digit(1, static_cast<uint_fast8_t>(dekaValue / 10) % 10, true);
-        sleep_ms(10);
-        display_digit(0, static_cast<uint_fast8_t>(dekaValue) % 10);
-        sleep_ms(10);
-    }
+    uint32_t dekaInt = static_cast<uint32_t>(dekaValue);
+    // digits encoded as set of seven-segment display bits.
+    uint32_t digits = 0;
+    digits |= static_cast<uint32_t>(encode_digit(dekaInt / 100 % 10)) << 16;
+    // For now, decimal point after 2nd digit.
+    digits |= static_cast<uint32_t>(encode_digit(dekaInt / 10 % 10, true)) << 8;
+    digits |= encode_digit(dekaInt % 10);
+    return digits;
+}
+
+static void display(const display_pio& disp, float value)
+{
+    uint32_t encoded = encode_for_pio(value);
+    pio_sm_put(disp.pio, disp.sm, encoded);
+#if 0
+    uint32_t encoded =
+        uint32_t(led_pins::display_pins[0]) << 16
+        | uint32_t(led_pins::display_pins[1]) << 8
+        | uint32_t(led_pins::display_pins[2]);
+    pio_sm_put(disp.pio, disp.sm, encoded);
+#endif
+    //pio_sm_put(disp.pio, disp.sm, uint32_t(~(7 | led_pins::dp))); // 7 encodes as 7. nice.
 }
 
 int main() {
-    setup();
+    display_pio disp = setup();
 
     absolute_time_t nextWakeup = get_absolute_time();
     float temperature_celsius = 0.0f;
@@ -186,7 +255,7 @@ int main() {
 
     for (;;) {
         temperature_celsius = get_temperature_celsius();
-        display(celsius_to_fahrenheit(temperature_celsius));
+        display(disp, celsius_to_fahrenheit(temperature_celsius));
         nextWakeup = delayed_by_ms(nextWakeup, updateIntervalMS.count());
         sleep_until(nextWakeup);
     }

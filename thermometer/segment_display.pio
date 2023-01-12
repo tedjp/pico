@@ -1,0 +1,69 @@
+; PIO program that displays 3 octets on seven-segment displays (SSDs).
+; Each octet contains a bit per segment, plus one bit
+; for a decimal point (on the right-hand-side of the digit).
+; Each octet must already be encoded for the seven-segment display; see
+; temperature.cpp for a function that maps the integers 0-8 to seven-segment
+; display bits.
+;
+; The bits are displayed in order from least-significant bit to
+; most-significant bit, least-significant octet to most-significant octet.
+
+.program segment_display
+; sideset selects the active seven-segment display.
+; Using 3 bits for sideset leaves only 2 delay bits, so the displays
+; will be cycled through very quickly.
+.side_set 3
+    ; Try to pull 32 bits from FIFO (non-blocking)
+    pull noblock side 0b100
+
+    ; Copy OSR to scratch X for reuse when display is unchanged
+    ; (pull copies X to OSR when FIFO is empty)
+    mov x osr side 0b100
+
+    ; Display each segment starting with LSB.
+    ; Each segment displays for 3 cycles (maximum due to side_set taking
+    ; 3 of the 5 delay bits).
+    out pins, 8 side 0b001 [3]
+    out pins, 8 side 0b010 [3]
+    out pins, 8 side 0b100 [1] ; wait 2 fewer cycles for pull & mov
+
+% c-sdk {
+static void segment_display_pio_init(
+        PIO pio,
+        uint sm,
+        uint offset,
+        uint segment_base,
+        uint display_base)
+{
+    // Number of segments per seven-segment display. (8th = decimal point)
+    const int segments = 8;
+    // Number of seven-segment displays (number of common anodes)
+    const int displays = 3;
+
+    // Set pins' GPIO functions
+    for (uint32_t i = segment_base; i < segment_base + segments; ++i)
+        pio_gpio_init(pio, i);
+    for (uint32_t i = display_base; i < display_base + displays; ++i)
+        pio_gpio_init(pio, i);
+
+    pio_sm_config config = segment_display_program_get_default_config(offset);
+    sm_config_set_out_pins(&config, segment_base, segments);
+    sm_config_set_sideset_pins(&config, display_base);
+    // these are probably defaults anyway, right?
+    sm_config_set_out_shift(&config, true, false, 0);
+
+    // Select a slowish clockdiv.
+    // This can be adjusted as desired. 60-100 Hz display ought to be
+    // sufficiently readable.
+    sm_config_set_clkdiv_int_frac(&config, 1u << 14, 0);
+
+    pio_sm_set_consecutive_pindirs(pio, sm, segment_base, segments, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, display_base, displays, true);
+
+    // Load configuration, and jump to the start of the program
+    pio_sm_init(pio, sm, offset, &config);
+
+    // Set the state machine running
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
