@@ -235,14 +235,6 @@ static void display(const display_pio& disp, float value)
 {
     uint32_t encoded = encode_for_pio(value);
     pio_sm_put(disp.pio, disp.sm, encoded);
-#if 0
-    uint32_t encoded =
-        uint32_t(led_pins::display_pins[0]) << 16
-        | uint32_t(led_pins::display_pins[1]) << 8
-        | uint32_t(led_pins::display_pins[2]);
-    pio_sm_put(disp.pio, disp.sm, encoded);
-#endif
-    //pio_sm_put(disp.pio, disp.sm, uint32_t(~(7 | led_pins::dp))); // 7 encodes as 7. nice.
 }
 
 int main() {
