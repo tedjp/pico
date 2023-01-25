@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 
@@ -16,8 +18,7 @@ static constexpr std::chrono::seconds TEMP_UPDATE_INTERVAL = std::chrono::second
 static constexpr int TEMP_SAMPLES = TEMP_SAMPLE_DURATION / TEMP_UPDATE_INTERVAL;
 
 // How many samples to read back-to-back each update.
-// This is not worth setting higher than 1, averaging over a longer period is better.
-static constexpr int SAMPLES_PER_UPDATE = 1;
+static constexpr int SAMPLES_PER_UPDATE = 5;
 
 static constexpr int NUM_DIGITS = 3;
 // common pin for each significant digit begins at this gpio
@@ -59,17 +60,17 @@ static float get_temperature_celsius_pico() {
     uint32_t accumulatedSamples = 0;
     static_assert(std::numeric_limits<decltype(accumulatedSamples)>::max() / (1U << 12) >= numSamples,
             "accumulatedSamples might wraparound, use fewer samples or a larger type");
-    adc_select_input(4);
+    adc_select_input(PICO_TEMP_SENSOR_ADC);
     for (int i = 0; i < numSamples; ++i)
         accumulatedSamples += adc_read();
 
     // Get a sample of a tied-to-ground ADC input to subtract the baseline
     // This might be excessive.
-    adc_select_input(2);
+    adc_select_input(ZERO_ADC);
     uint32_t zero = adc_read();
     accumulatedSamples -= zero * numSamples;
     // Restore the input to the temperature sensor
-    adc_select_input(4);
+    adc_select_input(PICO_TEMP_SENSOR_ADC);
 
     float adcTemp = accumulatedSamples / float(numSamples);
 
@@ -80,14 +81,21 @@ static float get_temperature_celsius_pico() {
 static float get_temperature_celsius_external() {
     adc_select_input(EXT_TEMP_SENSOR_ADC);
 
-    // Eventually replace with a single read and a history buffer that is
-    // averaged.
-    constexpr int numSamples = SAMPLES_PER_UPDATE;
-    uint32_t accumulatedSamples = 0;
-    for (int i = 0; i < numSamples; ++i)
-        accumulatedSamples += adc_read();
+    std::array<uint16_t, SAMPLES_PER_UPDATE> samples;
+    for (int i = 0; i < SAMPLES_PER_UPDATE; ++i) {
+        samples[i] = adc_read();
+    }
 
-    const uint16_t adcValue = static_cast<uint16_t>(accumulatedSamples / numSamples);
+    uint16_t adcValue;
+
+    if constexpr (SAMPLES_PER_UPDATE > 1) {
+        // Use the median
+        std::nth_element(samples.begin(), samples.begin() + samples.size() / 2, samples.end());
+        adcValue = samples[samples.size() / 2];
+    } else {
+        adcValue = samples[0];
+    }
+
     const float adcVolts = adcValue * ADC_VOLTS_PER_UNIT;
     const float adcMilliVolts = adcVolts * 1000.0f;
     // Datasheet: 10 mV per degree celsius
@@ -155,9 +163,6 @@ static display_pio setup() {
     // TODO (optional): Slow clk_sys (CPU) as low as 1 kHz.
 
     setup_adc();
-
-    //gpio_init_mask(all_digit_gpios_mask);
-    //gpio_set_dir_out_masked(all_digit_gpios_mask);
 
     return setup_pio();
 }
