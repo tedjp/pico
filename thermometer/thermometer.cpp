@@ -7,6 +7,18 @@
 
 #include "segment_display.pio.h"
 
+// Number of samples to average over, to smooth variance in the display.
+// A longer period provides a steadier value at the expense of slower adaptation
+// to changing conditions.
+static constexpr std::chrono::seconds TEMP_SAMPLE_DURATION = std::chrono::seconds(60);
+// Time between updates. Less frequent updates are more relaxing.
+static constexpr std::chrono::seconds TEMP_UPDATE_INTERVAL = std::chrono::seconds(2);
+static constexpr int TEMP_SAMPLES = TEMP_SAMPLE_DURATION / TEMP_UPDATE_INTERVAL;
+
+// How many samples to read back-to-back each update.
+// This is not worth setting higher than 1, averaging over a longer period is better.
+static constexpr int SAMPLES_PER_UPDATE = 1;
+
 static constexpr int NUM_DIGITS = 3;
 // common pin for each significant digit begins at this gpio
 // Suggest starting at GPIO 2 or higher to reserve 0 & 1 for UART.
@@ -25,9 +37,6 @@ static constexpr float ADC_VOLTAGE = 3.27f;
 static constexpr int ADC_BITS = 12;
 static constexpr unsigned int ADC_MAX = 1u << ADC_BITS;
 static constexpr float ADC_VOLTS_PER_UNIT = ADC_VOLTAGE / ADC_MAX;
-// Future: PIO will update LED pins so the core can sleep between samples
-// (likely 1 sample per second, display average of last 10 samples).
-static constexpr std::chrono::seconds TEMP_UPDATE_INTERVAL = std::chrono::seconds(1);
 
 static constexpr uint32_t get_common_gpio_mask() noexcept {
     uint32_t mask = 0;
@@ -46,7 +55,7 @@ static constexpr uint32_t all_digit_gpios_mask = segment_gpio_mask | common_gpio
 static float get_temperature_celsius_pico() {
     // make sure resulting type is big enough to hold max 12-bit value (4095) x
     // numSamples.
-    constexpr int numSamples = 4;
+    constexpr int numSamples = SAMPLES_PER_UPDATE;
     uint32_t accumulatedSamples = 0;
     static_assert(std::numeric_limits<decltype(accumulatedSamples)>::max() / (1U << 12) >= numSamples,
             "accumulatedSamples might wraparound, use fewer samples or a larger type");
@@ -55,8 +64,9 @@ static float get_temperature_celsius_pico() {
         accumulatedSamples += adc_read();
 
     // Get a sample of a tied-to-ground ADC input to subtract the baseline
+    // This might be excessive.
     adc_select_input(2);
-    uint32_t zero = 0;
+    uint32_t zero = adc_read();
     accumulatedSamples -= zero * numSamples;
     // Restore the input to the temperature sensor
     adc_select_input(4);
@@ -72,7 +82,7 @@ static float get_temperature_celsius_external() {
 
     // Eventually replace with a single read and a history buffer that is
     // averaged.
-    constexpr int numSamples = 4;
+    constexpr int numSamples = SAMPLES_PER_UPDATE;
     uint32_t accumulatedSamples = 0;
     for (int i = 0; i < numSamples; ++i)
         accumulatedSamples += adc_read();
@@ -241,15 +251,18 @@ int main() {
     display_pio disp = setup();
 
     absolute_time_t nextWakeup = get_absolute_time();
-    float temperature_celsius = 0.0f;
+    float temperature_celsius = get_temperature_celsius();
     constexpr auto updateIntervalMS
         = std::chrono::duration_cast<std::chrono::milliseconds>(TEMP_UPDATE_INTERVAL);
 
     for (;;) {
-        temperature_celsius = get_temperature_celsius();
         display(disp, celsius_to_fahrenheit(temperature_celsius));
         nextWakeup = delayed_by_ms(nextWakeup, updateIntervalMS.count());
         sleep_until(nextWakeup);
+        static_assert(TEMP_SAMPLES != 0);
+        temperature_celsius
+            = temperature_celsius * (float(TEMP_SAMPLES - 1) / float(TEMP_SAMPLES))
+            + get_temperature_celsius() * (1.0f / TEMP_SAMPLES);
     }
 
     return 0;
